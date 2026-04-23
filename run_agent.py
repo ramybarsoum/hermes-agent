@@ -85,7 +85,7 @@ from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
-    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SOURCE_ROUTING_GUIDANCE, SKILLS_GUIDANCE,
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
@@ -99,7 +99,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, STRATEGY_GUIDANCE_HEADER
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -889,6 +889,9 @@ class AIAgent:
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
+        primary_model_override: str = None,
+        primary_runtime_override: Dict[str, Any] = None,
+        restore_primary_after_tool_selection: bool = False,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
@@ -1575,7 +1578,20 @@ class AIAgent:
                 logger.warning(
                     "Session DB create_session failed (session_search still available): %s", e
                 )
-        
+
+        # ── Strategy guidance injection (Phase 3) ──────────────────────
+        # Read promoted strategies from the registry and append bounded
+        # runtime guidance to ephemeral_system_prompt.  This runs once at
+        # agent init, so strategy changes take effect on the next session.
+        _strategy_guidance = self._build_strategy_guidance()
+        if _strategy_guidance:
+            if self.ephemeral_system_prompt:
+                self.ephemeral_system_prompt = (
+                    self.ephemeral_system_prompt + "\n\n" + _strategy_guidance
+                )
+            else:
+                self.ephemeral_system_prompt = _strategy_guidance
+
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
         self._todo_store = TodoStore()
@@ -2043,6 +2059,84 @@ class AIAgent:
                 "anthropic_base_url": self._anthropic_base_url,
                 "is_anthropic_oauth": self._is_anthropic_oauth,
             })
+        self._restore_primary_after_tool_selection = bool(restore_primary_after_tool_selection)
+        if primary_model_override or primary_runtime_override:
+            self._override_primary_runtime_snapshot(
+                primary_model_override or self.model,
+                primary_runtime_override or {},
+            )
+
+    def _override_primary_runtime_snapshot(self, model: str, runtime: Dict[str, Any]) -> None:
+        """Replace the stored primary-runtime snapshot without changing the live runtime."""
+        from agent.model_metadata import get_model_context_length
+
+        runtime = dict(runtime or {})
+        primary_model = model or self.model
+        primary_provider = str(runtime.get("provider") or self.provider or "").strip().lower()
+        primary_base_url = runtime.get("base_url") or self.base_url
+        primary_api_mode = runtime.get("api_mode") or self.api_mode
+        primary_api_key = runtime.get("api_key") or getattr(self, "api_key", "")
+
+        try:
+            from hermes_cli.model_normalize import (
+                _AGGREGATOR_PROVIDERS,
+                normalize_model_for_provider,
+            )
+
+            if primary_provider not in _AGGREGATOR_PROVIDERS:
+                primary_model = normalize_model_for_provider(primary_model, primary_provider)
+        except Exception:
+            pass
+
+        use_prompt_caching = (
+            ("openrouter" in str(primary_base_url or "").lower() and "claude" in primary_model.lower())
+            or (primary_api_mode == "anthropic_messages" and primary_provider == "anthropic")
+        )
+        context_length = get_model_context_length(
+            primary_model,
+            base_url=primary_base_url,
+            api_key=primary_api_key,
+            provider=primary_provider,
+            config_context_length=getattr(self, "_config_context_length", None),
+        )
+
+        client_kwargs = {
+            "api_key": primary_api_key,
+            "base_url": primary_base_url,
+        }
+        default_headers = runtime.get("default_headers")
+        if isinstance(default_headers, dict) and default_headers:
+            client_kwargs["default_headers"] = dict(default_headers)
+
+        self._primary_runtime = {
+            "model": primary_model,
+            "provider": primary_provider,
+            "base_url": primary_base_url,
+            "api_mode": primary_api_mode,
+            "api_key": primary_api_key,
+            "client_kwargs": client_kwargs,
+            "use_prompt_caching": use_prompt_caching,
+            "compressor_model": primary_model,
+            "compressor_base_url": primary_base_url,
+            "compressor_api_key": primary_api_key,
+            "compressor_provider": primary_provider,
+            "compressor_context_length": context_length,
+            "compressor_threshold_tokens": 0,
+        }
+        if primary_api_mode == "anthropic_messages":
+            self._primary_runtime.update({
+                "anthropic_api_key": primary_api_key,
+                "anthropic_base_url": primary_base_url,
+                "is_anthropic_oauth": False,
+            })
+
+    def _maybe_restore_primary_after_tool_selection(self) -> bool:
+        """Return to the primary runtime after a cheap tool-selection pass."""
+        if not getattr(self, "_restore_primary_after_tool_selection", False):
+            return False
+        restored = self._restore_primary_runtime(force=True)
+        self._restore_primary_after_tool_selection = False
+        return restored
 
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
@@ -4499,6 +4593,10 @@ class AIAgent:
             tool_guidance.append(SKILLS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
+
+        # Source-first routing: always present, prevents searching when
+        # the user already provided a direct URL with a native tool path.
+        prompt_parts.append(SOURCE_ROUTING_GUIDANCE)
 
         nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
         if nous_subscription_prompt:
@@ -7026,18 +7124,14 @@ class AIAgent:
 
     # ── Per-turn primary restoration ─────────────────────────────────────
 
-    def _restore_primary_runtime(self) -> bool:
-        """Restore the primary runtime at the start of a new turn.
+    def _restore_primary_runtime(self, force: bool = False) -> bool:
+        """Restore the primary runtime.
 
-        In long-lived CLI sessions a single AIAgent instance spans multiple
-        turns.  Without restoration, one transient failure pins the session
-        to the fallback provider for every subsequent turn.  Calling this at
-        the top of ``run_conversation()`` makes fallback turn-scoped.
-
-        The gateway caches agents across messages (``_agent_cache`` in
-        ``gateway/run.py``), so this restoration IS needed there too.
+        Normally used at the start of a new turn after fallback activation.
+        When ``force=True``, also supports mid-turn restoration after a cheap
+        tool-selection pass.
         """
-        if not self._fallback_activated:
+        if not force and not self._fallback_activated:
             return False
 
         if getattr(self, "_rate_limited_until", 0) > time.monotonic():
@@ -8227,6 +8321,82 @@ class AIAgent:
             parent_agent=self,
         )
 
+    # =========================================================================
+    # Strategy telemetry (evidence-backed agent improvement)
+    # =========================================================================
+
+    def _record_tool_telemetry(
+        self,
+        function_name: str,
+        function_result: str,
+        duration_seconds: float,
+        is_error: bool,
+    ) -> None:
+        """Record a tool-call strategy event. Best-effort, never blocks."""
+        if not self._session_db:
+            return
+        try:
+            result_tag = "failure" if is_error else "success"
+            self._session_db.record_strategy_event(
+                session_id=self.session_id or "",
+                event_type="tool_call",
+                tool_name=function_name,
+                result=result_tag,
+                latency_ms=round(duration_seconds * 1000, 1),
+                metadata={
+                    "result_len": len(function_result) if function_result else 0,
+                    "is_error": is_error,
+                },
+            )
+        except Exception:
+            pass  # telemetry must never block
+
+    def _build_strategy_guidance(self) -> Optional[str]:
+        """Build ephemeral strategy guidance from promoted strategies.
+
+        Reads promoted strategies from the session DB strategy registry and
+        formats them as bounded runtime guidance.  Returns None if no
+        strategies are promoted (the common case in early usage).
+
+        This is injected into ephemeral_system_prompt, NOT the cached system
+        prompt, so:
+          - it's never persisted to session logs
+          - it's easily reversible (unpromote the strategy)
+          - it doesn't inflate the cached prompt prefix
+        """
+        if not self._session_db:
+            return None
+        try:
+            promoted = self._session_db.get_promoted_strategies()
+        except Exception:
+            return None
+
+        if not promoted:
+            return None
+
+        lines = [STRATEGY_GUIDANCE_HEADER, ""]
+        for s in promoted:
+            name = s.get("name", "unknown")
+            desc = s.get("description", "")
+            score = s.get("score", 0)
+            n = s.get("sample_count", 0)
+            config = s.get("config_json")
+            line = f"- **{name}** (score: {score:.2f}, n={n})"
+            if desc:
+                line += f": {desc}"
+            # If the strategy has guidance text in its config, append it
+            if config:
+                try:
+                    cfg = json.loads(config) if isinstance(config, str) else config
+                    guidance = cfg.get("guidance")
+                    if guidance:
+                        line += f"\n  {guidance}"
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            lines.append(line)
+
+        return "\n".join(lines)
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None) -> str:
         """Invoke a single tool and return the result string. No display logic.
@@ -8567,6 +8737,9 @@ class AIAgent:
                 if is_error:
                     result_preview = function_result[:200] if len(function_result) > 200 else function_result
                     logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
+
+                # ── Strategy telemetry (Phase 1: observe-only) ────────
+                self._record_tool_telemetry(function_name, function_result, tool_duration, is_error)
 
                 if self.tool_progress_callback:
                     try:
@@ -8942,6 +9115,9 @@ class AIAgent:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, len(function_result))
+
+            # ── Strategy telemetry (Phase 1: observe-only) ────────────
+            self._record_tool_telemetry(function_name, function_result, tool_duration, _is_error_result)
 
             if self.tool_progress_callback:
                 try:
@@ -11987,6 +12163,7 @@ class AIAgent:
                         except Exception:
                             pass
 
+                    self._maybe_restore_primary_after_tool_selection()
                     self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
                     # Reset per-turn retry counters after successful tool
