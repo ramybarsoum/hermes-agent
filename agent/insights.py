@@ -928,3 +928,225 @@ class InsightsEngine:
                 lines.append(f"**Best streak:** {act['max_streak']} consecutive days")
 
         return "\n".join(lines)
+
+    # =========================================================================
+    # Strategy insights (evidence-backed agent improvement, Phase 4)
+    # =========================================================================
+
+    def generate_strategy_report(self, days: int = 30) -> Dict[str, Any]:
+        """Generate a strategy telemetry + registry report."""
+        import time as _time
+        since = _time.time() - (days * 86400) if days else None
+
+        report: Dict[str, Any] = {
+            "days": days,
+            "tool_stats": [],
+            "registry": {"candidate": [], "promoted": [], "retired": []},
+            "total_events": 0,
+            "empty": True,
+        }
+
+        # Aggregate tool performance from strategy_events
+        try:
+            tool_stats = self.db.aggregate_tool_stats(since=since)
+            report["tool_stats"] = tool_stats
+            report["total_events"] = sum(t.get("total_calls", 0) for t in tool_stats)
+            if tool_stats:
+                report["empty"] = False
+        except Exception:
+            pass
+
+        # List strategies from the registry
+        try:
+            for state in ("candidate", "promoted", "retired"):
+                strategies = self.db.list_strategies(state=state)
+                for s in strategies:
+                    n = s.get("sample_count", 0)
+                    sc = s.get("success_count", 0)
+                    s["success_rate"] = round(sc / n, 3) if n > 0 else 0.0
+                    for ts_key in ("created_at", "updated_at", "promoted_at", "retired_at"):
+                        ts = s.get(ts_key)
+                        if ts:
+                            s[f"{ts_key}_fmt"] = datetime.fromtimestamp(ts).strftime("%b %d")
+                        else:
+                            s[f"{ts_key}_fmt"] = "—"
+                report["registry"][state] = strategies
+                if strategies:
+                    report["empty"] = False
+        except Exception:
+            pass
+
+        # Scan skills for candidate/promoted status
+        try:
+            from tools.skill_manager_tool import _get_all_skill_dirs
+            import re as _re
+            candidate_skills = []
+            promoted_skills = []
+            stub_skills = []
+            for skill_dir in _get_all_skill_dirs():
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.exists():
+                    continue
+                content = skill_md.read_text(encoding="utf-8")
+                fm_match = _re.match(r'^---\n([\s\S]*?)\n---', content)
+                name = skill_dir.name
+                if not fm_match:
+                    stub_skills.append({"name": name, "issue": "no frontmatter"})
+                    continue
+                fm = fm_match.group(1)
+                if "status: candidate" in fm:
+                    candidate_skills.append({"name": name})
+                elif "status: promoted" in fm:
+                    promoted_skills.append({"name": name})
+                if "## Contract" not in content:
+                    stub_skills.append({"name": name, "issue": "no Contract section"})
+            report["skill_health"] = {
+                "candidates": candidate_skills,
+                "promoted": promoted_skills,
+                "stubs": stub_skills,
+            }
+            if candidate_skills or stub_skills:
+                report["empty"] = False
+        except Exception:
+            pass
+
+        return report
+
+    def format_strategy_terminal(self, report: Dict) -> str:
+        """Format strategy report for terminal display."""
+        if report.get("empty"):
+            days = report.get("days", 30)
+            return f"  No strategy telemetry collected in the last {days} days."
+
+        lines = []
+        lines.append("")
+        lines.append("  ╔══════════════════════════════════════════════════════════╗")
+        lines.append("  ║              🎯 Strategy Telemetry & Registry             ║")
+        days = report.get("days", 30)
+        period_label = f"Last {days} days"
+        padding = 58 - len(period_label) - 2
+        left_pad = padding // 2
+        right_pad = padding - left_pad
+        lines.append(f"  ║{' ' * left_pad} {period_label} {' ' * right_pad}║")
+        lines.append("  ╚══════════════════════════════════════════════════════════╝")
+        lines.append("")
+
+        # Tool performance table
+        tool_stats = report.get("tool_stats", [])
+        if tool_stats:
+            lines.append("  🔧 Tool Performance (from telemetry)")
+            lines.append("  " + "─" * 60)
+            lines.append(f"  {'Tool':<20} {'Calls':>7} {'OK':>7} {'Fail':>7} {'Rate':>7} {'Avg ms':>9}")
+            for t in tool_stats[:20]:
+                total = t.get("total_calls", 0)
+                ok = t.get("success_count", 0)
+                fail = t.get("failure_count", 0)
+                rate = ok / total if total > 0 else 0
+                avg_ms = t.get("avg_latency_ms") or 0
+                lines.append(f"  {t['tool_name']:<20} {total:>7,} {ok:>7,} {fail:>7,} {rate:>6.1%} {avg_ms:>8.0f}")
+            if len(tool_stats) > 20:
+                lines.append(f"  ... and {len(tool_stats) - 20} more tools")
+            lines.append(f"  Total events: {report.get('total_events', 0):,}")
+            lines.append("")
+
+        # Registry sections
+        registry = report.get("registry", {})
+        state_labels = [
+            ("promoted", "✅ Promoted Strategies", "Active runtime guidance"),
+            ("candidate", "🔬 Candidate Strategies", "Under evaluation"),
+            ("retired", "⚰️  Retired Strategies", "Removed from guidance"),
+        ]
+        for state_key, header, sublabel in state_labels:
+            entries = registry.get(state_key, [])
+            if entries:
+                lines.append(f"  {header}")
+                lines.append("  " + "─" * 60)
+                lines.append(f"  {sublabel}")
+                for s in entries:
+                    score_bar = "█" * int(s["score"] * 10) + "░" * (10 - int(s["score"] * 10))
+                    line = f"  {s['name']:<24} [{score_bar}] {s['score']:.2f}"
+                    n = s.get("sample_count", 0)
+                    rate_val = s.get("success_rate", 0)
+                    line += f"  n={n}  {rate_val:.0%}"
+                    lines.append(line)
+                    if s.get("description"):
+                        lines.append(f"    {s['description']}")
+                    if state_key == "promoted" and s.get("promoted_at_fmt", "—") != "—":
+                        lines.append(f"    Promoted: {s['promoted_at_fmt']}")
+                    elif state_key == "retired" and s.get("retired_at_fmt", "—") != "—":
+                        lines.append(f"    Retired: {s['retired_at_fmt']}")
+                lines.append("")
+
+        if not tool_stats and not any(registry.values()):
+            lines.append("  No strategy data yet. Strategies are built from tool telemetry.")
+            lines.append("  Use the agent normally — telemetry accumulates automatically.")
+            lines.append("")
+
+        # Skill health section
+        skill_health = report.get("skill_health", {})
+        candidates = skill_health.get("candidates", [])
+        stubs = skill_health.get("stubs", [])
+        if candidates or stubs:
+            lines.append("")
+            lines.append("  🛠️  Skill Health")
+            lines.append("  " + "─" * 60)
+            if candidates:
+                lines.append(f"  Candidates awaiting promotion: {len(candidates)}")
+                for c in candidates[:10]:
+                    lines.append(f"    • {c['name']}")
+            if stubs:
+                lines.append(f"  Skills needing attention: {len(stubs)}")
+                for s in stubs[:10]:
+                    lines.append(f"    • {s['name']} ({s['issue']})")
+            promoted = skill_health.get("promoted", [])
+            if promoted:
+                lines.append(f"  Promoted skills: {len(promoted)}")
+
+        return "\n".join(lines)
+
+    def format_strategy_gateway(self, report: Dict) -> str:
+        """Format strategy report for gateway/messaging (compact)."""
+        if report.get("empty"):
+            return "No strategy telemetry collected yet."
+
+        lines = []
+        lines.append("🎯 **Strategy Report**\n")
+
+        tool_stats = report.get("tool_stats", [])
+        if tool_stats:
+            lines.append("**🔧 Top Tool Performance:**")
+            for t in tool_stats[:8]:
+                total = t.get("total_calls", 0)
+                ok = t.get("success_count", 0)
+                rate = ok / total if total > 0 else 0
+                avg_ms = t.get("avg_latency_ms") or 0
+                lines.append(f"  {t['tool_name']} — {total:,} calls, {rate:.0%} success, {avg_ms:.0f}ms avg")
+            lines.append("")
+
+        registry = report.get("registry", {})
+        for state_key, label in [("promoted", "**✅ Promoted:**"), ("candidate", "**🔬 Candidates:**")]:
+            entries = registry.get(state_key, [])
+            if entries:
+                lines.append(label)
+                for s in entries:
+                    lines.append(f"  {s['name']} — score {s['score']:.2f}, n={s.get('sample_count', 0)}, {s.get('success_rate', 0):.0%} success")
+                lines.append("")
+
+        # Skill health (compact)
+        skill_health = report.get("skill_health", {})
+        candidates = skill_health.get("candidates", [])
+        stubs = skill_health.get("stubs", [])
+        if candidates or stubs:
+            lines.append("**🛠️ Skill Health:**")
+            if candidates:
+                names = ", ".join(c["name"] for c in candidates[:10])
+                lines.append(f"  Candidates: {names}")
+            promoted = skill_health.get("promoted", [])
+            if promoted:
+                lines.append(f"  Promoted: {len(promoted)} skill(s)")
+            if stubs:
+                stub_names = ", ".join(f"{s['name']} ({s['issue']})" for s in stubs[:10])
+                lines.append(f"  Needs attention: {stub_names}")
+            lines.append("")
+
+        return "\n".join(lines)

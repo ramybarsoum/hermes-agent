@@ -230,6 +230,70 @@ def _resolve_skill_dir(name: str, category: str = None) -> Path:
     return SKILLS_DIR / name
 
 
+def _get_all_skill_dirs() -> list:
+    """Return all skill directories (those containing SKILL.md)."""
+    skills_root = Path(get_hermes_home()) / "skills"
+    if not skills_root.exists():
+        return []
+    dirs = []
+    for child in sorted(skills_root.iterdir()):
+        if child.is_dir() and (child / "SKILL.md").exists():
+            dirs.append(child)
+        if child.is_dir() and not (child / "SKILL.md").exists():
+            for grandchild in sorted(child.iterdir()):
+                if grandchild.is_dir() and (grandchild / "SKILL.md").exists():
+                    dirs.append(grandchild)
+    return dirs
+
+
+def _promote_skill(name: str) -> Dict[str, Any]:
+    """Promote a candidate skill to official after validation checks.
+
+    Validation gates:
+    1. Skill must exist and have a SKILL.md
+    2. SKILL.md must have YAML frontmatter with name + description
+    3. SKILL.md must have a ## Contract section
+    4. Skill must not be a stub (body must be > 200 chars excluding frontmatter)
+    """
+    skill_dir = _resolve_skill_dir(name)
+    if not skill_dir or not skill_dir.exists():
+        return {"success": False, "error": f"Skill '{name}' not found."}
+
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        return {"success": False, "error": f"SKILL.md not found for '{name}'."}
+
+    content = skill_md.read_text(encoding="utf-8")
+
+    fm_match = re.match(r'^---\n([\s\S]*?)\n---', content)
+    if not fm_match:
+        return {"success": False, "error": "SKILL.md missing YAML frontmatter.", "gate": "frontmatter"}
+
+    fm = fm_match.group(1)
+    has_name = bool(re.search(r'^name:', fm, re.MULTILINE))
+    has_desc = bool(re.search(r'^description:', fm, re.MULTILINE))
+    if not (has_name and has_desc):
+        return {"success": False, "error": "Frontmatter missing name or description.", "gate": "frontmatter_fields"}
+
+    if "## Contract" not in content:
+        return {"success": False, "error": "SKILL.md missing ## Contract section.", "gate": "contract_section"}
+
+    body = re.sub(r'^---\n[\s\S]*?\n---\n?', '', content).strip()
+    if len(body) < 200:
+        return {"success": False, "error": f"Skill body too short ({len(body)} chars, minimum 200).", "gate": "minimum_body"}
+
+    if "status:" not in fm_match.group(1):
+        new_fm = fm_match.group(1).rstrip() + "\nstatus: promoted\n"
+        new_content = content.replace(fm_match.group(1), new_fm, 1)
+        skill_md.write_text(new_content, encoding="utf-8")
+
+    return {
+        "success": True,
+        "message": f"Skill '{name}' promoted successfully. All validation gates passed.",
+        "gates_passed": ["frontmatter", "frontmatter_fields", "contract_section", "minimum_body"],
+    }
+
+
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     """
     Find a skill by name across all skill directories.
@@ -689,8 +753,11 @@ def skill_manage(
             return tool_error("file_path is required for 'remove_file'.", success=False)
         result = _remove_file(name, file_path)
 
+    elif action == "promote":
+        result = _promote_skill(name)
+
     else:
-        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file, promote"}
 
     if result.get("success"):
         try:
@@ -732,8 +799,8 @@ SKILL_MANAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
-                "description": "The action to perform."
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file", "promote"],
+                "description": "The action to perform. 'promote' validates and promotes a candidate skill."
             },
             "name": {
                 "type": "string",
