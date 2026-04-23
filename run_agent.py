@@ -8351,6 +8351,72 @@ class AIAgent:
         except Exception:
             pass  # telemetry must never block
 
+    def _check_routing_miss(
+        self,
+        function_name: str,
+        messages: list,
+        tool_index: int,
+    ) -> None:
+        """Detect when the agent searches/browses for a URL that has a native integration.
+
+        Records a ``routing_miss`` strategy event when:
+        1. This is the first tool call in the current conversation turn, AND
+        2. The tool is ``web_search`` or ``browser_navigate``, AND
+        3. The last user message contains a URL for a domain with a known
+           native integration (x.com, youtube.com, github.com, etc.).
+
+        Best-effort: never raises.  Feeds the promotion pipeline with real
+        failure data for source-first-routing.
+        """
+        if not self._session_db:
+            return
+        if tool_index > 0:
+            return  # only check the first tool call in a turn
+        try:
+            # Only relevant for search/browse tools
+            if function_name not in ("web_search", "browser_navigate"):
+                return
+
+            # Find the last user message content
+            last_user_content = ""
+            for msg in reversed(messages):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    last_user_content = content if isinstance(content, str) else ""
+                    break
+
+            if not last_user_content:
+                return
+
+            # Check for URLs with known native integrations
+            import re as _re
+            native_domains = _re.compile(
+                r"https?://(?:www\.)?(x\.com|twitter\.com|youtube\.com|youtu\.be|github\.com)/",
+                _re.IGNORECASE,
+            )
+            match = native_domains.search(last_user_content)
+            if not match:
+                return
+
+            domain = match.group(1).lower()
+            self._session_db.record_strategy_event(
+                session_id=self.session_id or "",
+                event_type="routing_miss",
+                tool_name=function_name,
+                strategy="source-first-routing",
+                result="miss",
+                metadata={
+                    "url_domain": domain,
+                    "tool_called": function_name,
+                    "user_message_len": len(last_user_content),
+                },
+            )
+            logger.debug(
+                "routing_miss: domain=%s tool=%s", domain, function_name,
+            )
+        except Exception:
+            pass  # telemetry must never block
+
     def _build_strategy_guidance(self) -> Optional[str]:
         """Build ephemeral strategy guidance from promoted strategies.
 
@@ -8740,6 +8806,7 @@ class AIAgent:
 
                 # ── Strategy telemetry (Phase 1: observe-only) ────────
                 self._record_tool_telemetry(function_name, function_result, tool_duration, is_error)
+                self._check_routing_miss(function_name, messages, i)
 
                 if self.tool_progress_callback:
                     try:
@@ -9118,6 +9185,7 @@ class AIAgent:
 
             # ── Strategy telemetry (Phase 1: observe-only) ────────────
             self._record_tool_telemetry(function_name, function_result, tool_duration, _is_error_result)
+            self._check_routing_miss(function_name, messages, i - 1)
 
             if self.tool_progress_callback:
                 try:
