@@ -988,6 +988,21 @@ DEFAULT_CONFIG = {
         "force_ipv4": False,
     },
 
+    # Source-first routing — domain-level tool preferences loaded from config
+    # instead of hardcoded.  The agent reads routing.domain_rules at prompt
+    # assembly time to build SOURCE_ROUTING_GUIDANCE dynamically.
+    "routing": {
+        "enabled": True,
+        "domain_rules": {
+            "x.com": {"tool": "xurl read", "pattern": r"x\.com|twitter\.com"},
+            "youtube.com": {"tool": "transcript extraction", "pattern": r"youtube\.com|youtu\.be"},
+            "github.com": {"tool": "gh CLI / git", "pattern": r"github\.com"},
+            "docs.google.com": {"tool": "google-workspace", "pattern": r"docs\.google\.com|sheets\.google\.com|drive\.google\.com"},
+            "notion.so": {"tool": "notion API", "pattern": r"notion\.so"},
+            "linear.app": {"tool": "linear CLI", "pattern": r"linear\.app"},
+        },
+    },
+
     # Session storage — controls automatic cleanup of ~/.hermes/state.db.
     # state.db accumulates every session, message, tool call, and FTS5 index
     # entry forever.  Without auto-pruning, a heavy user (gateway + cron)
@@ -1024,7 +1039,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 22,
+    "_config_version": 23,
 }
 
 # =============================================================================
@@ -2336,7 +2351,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
-    "sessions",
+    "sessions", "routing",
 }
 
 # Valid fields inside a custom_providers list entry
@@ -2824,6 +2839,16 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                         print(f"  ✓ Migrated compression.summary_* → auxiliary.compression: {', '.join(migrated_keys)}")
                     else:
                         print("  ✓ Removed unused compression.summary_* keys")
+
+    # ── Version 17 → 18: add routing section for source-first domain rules ──
+    if current_ver < 18:
+        config = read_raw_config()
+        routing = config.get("routing")
+        if not isinstance(routing, dict) or "domain_rules" not in routing:
+            config["routing"] = DEFAULT_CONFIG["routing"]
+            save_config(config)
+            if not quiet:
+                print("  ✓ Added routing.domain_rules to config.yaml (source-first routing)")
 
     # ── Version 20 → 21: plugins are now opt-in; grandfather existing user plugins ──
     # The loader now requires plugins to appear in ``plugins.enabled`` before

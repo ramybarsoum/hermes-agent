@@ -179,6 +179,46 @@ SOURCE_ROUTING_GUIDANCE = (
     "native tool first. Do not search when you already have the exact target."
 )
 
+
+def build_source_routing_guidance() -> str:
+    """Build source-routing guidance from config.
+
+    Reads ``routing.domain_rules`` from the active config.yaml.  Returns an
+    empty string when routing is disabled.  Falls back to a minimal default
+    set (x.com, youtube, github) when config cannot be loaded.
+    """
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        routing = config.get("routing", {})
+        if not routing.get("enabled", True):
+            return ""
+        domain_rules = routing.get("domain_rules", {})
+    except Exception:
+        domain_rules = {
+            "x.com": {"tool": "xurl read"},
+            "youtube.com": {"tool": "transcript extraction"},
+            "github.com": {"tool": "gh CLI / git"},
+        }
+
+    if not domain_rules:
+        return ""
+
+    lines = [
+        "# Source-first routing",
+        "When the user provides an explicit URL, prefer the native tool for that domain instead of searching:",
+        "",
+    ]
+    for domain, rule in domain_rules.items():
+        tool = rule.get("tool", "native tool")
+        lines.append(f"- {domain} URLs → use {tool} directly, do not search first")
+
+    lines.append("")
+    lines.append("General rule: if you have a direct URL and a native tool for that domain, use the native tool first.")
+    lines.append("Do not search when you already have the exact target.")
+
+    return "\n".join(lines)
+
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
     "or discovering a non-trivial workflow, save the approach as a "

@@ -86,7 +86,7 @@ from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SOURCE_ROUTING_GUIDANCE, SKILLS_GUIDANCE,
-    build_nous_subscription_prompt,
+    build_nous_subscription_prompt, build_source_routing_guidance,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -4596,7 +4596,10 @@ class AIAgent:
 
         # Source-first routing: always present, prevents searching when
         # the user already provided a direct URL with a native tool path.
-        prompt_parts.append(SOURCE_ROUTING_GUIDANCE)
+        # Dynamic builder loads rules from config.yaml; static constant is
+        # the fallback when config is unavailable.
+        routing_guidance = build_source_routing_guidance() or SOURCE_ROUTING_GUIDANCE
+        prompt_parts.append(routing_guidance)
 
         nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
         if nous_subscription_prompt:
