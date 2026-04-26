@@ -96,8 +96,13 @@ def _github_signature(body: bytes, secret: str) -> str:
 
 
 def _generic_signature(body: bytes, secret: str) -> str:
-    """Compute X-Webhook-Signature (plain HMAC-SHA256 hex) for *body*."""
+    """Compute plain HMAC-SHA256 hex signature used by generic webhooks."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _circleback_signature(body: bytes, secret: str) -> str:
+    """Compute Circleback-compatible HMAC-SHA256 hex signature."""
+    return _generic_signature(body, secret)
 
 
 # ===================================================================
@@ -168,6 +173,24 @@ class TestValidateSignature:
         secret = "generic-secret"
         sig = _generic_signature(body, secret)
         req = _mock_request(headers={"X-Webhook-Signature": sig})
+        assert adapter._validate_signature(req, body, secret) is True
+
+    def test_validate_circleback_signature_valid(self):
+        """Circleback's X-Signature header is accepted."""
+        adapter = _make_adapter()
+        body = b'{"id": 1234, "name": "Weekly Sync"}'
+        secret = "circleback-secret"
+        sig = _circleback_signature(body, secret)
+        req = _mock_request(headers={"X-Signature": sig})
+        assert adapter._validate_signature(req, body, secret) is True
+
+    def test_validate_legacy_circleback_signature_valid(self):
+        """Legacy/custom X-Circleback-Signature header is accepted too."""
+        adapter = _make_adapter()
+        body = b'{"id": 1234, "name": "Weekly Sync"}'
+        secret = "circleback-secret"
+        sig = _circleback_signature(body, secret)
+        req = _mock_request(headers={"X-Circleback-Signature": sig})
         assert adapter._validate_signature(req, body, secret) is True
 
 

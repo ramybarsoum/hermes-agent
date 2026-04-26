@@ -192,12 +192,15 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_message_event(event, say):
                 await self._handle_slack_message(event)
 
-            # Acknowledge app_mention events to prevent Bolt 404 errors.
-            # The "message" handler above already processes @mentions in
-            # channels, so this is intentionally a no-op to avoid duplicates.
+            # Handle app_mention events as a fallback.
+            # If the Slack app subscribes to both message.channels AND
+            # app_mention, the message handler fires first and the dedup
+            # cache prevents double-processing.  But if message.channels
+            # is NOT subscribed, app_mention is the ONLY event we get for
+            # channel @mentions — so we must process it here.
             @self._app.event("app_mention")
             async def handle_app_mention(event, say):
-                pass
+                await self._handle_slack_message(event)
 
             @self._app.event("assistant_thread_started")
             async def handle_assistant_thread_started(event, say):

@@ -6581,6 +6581,9 @@ class GatewayRunner:
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,
                     request_overrides=turn_route.get("request_overrides"),
+                    primary_model_override=turn_route.get("primary_model"),
+                    primary_runtime_override=turn_route.get("primary_runtime"),
+                    restore_primary_after_tool_selection=turn_route.get("restore_primary_after_tool_selection", False),
                     providers_allowed=pr.get("only"),
                     providers_ignored=pr.get("ignore"),
                     providers_order=pr.get("order"),
@@ -6671,6 +6674,7 @@ class GatewayRunner:
                 )
             except Exception:
                 pass
+
 
     async def _handle_reasoning_command(self, event: MessageEvent) -> str:
         """Handle /reasoning command — manage reasoning effort and display toggle.
@@ -7382,8 +7386,9 @@ class GatewayRunner:
 
         days = 30
         source = None
+        show_strategies = False
 
-        # Parse simple args: /insights 7  or  /insights --days 7
+        # Parse simple args: /insights 7  or  /insights --days 7  or  /insights --strategies
         if args:
             parts = args.split()
             i = 0
@@ -7397,6 +7402,9 @@ class GatewayRunner:
                 elif parts[i] == "--source" and i + 1 < len(parts):
                     source = parts[i + 1]
                     i += 2
+                elif parts[i] == "--strategies":
+                    show_strategies = True
+                    i += 1
                 elif parts[i].isdigit():
                     days = int(parts[i])
                     i += 1
@@ -7412,8 +7420,12 @@ class GatewayRunner:
             def _run_insights():
                 db = SessionDB()
                 engine = InsightsEngine(db)
-                report = engine.generate(days=days, source=source)
-                result = engine.format_gateway(report)
+                if show_strategies:
+                    report = engine.generate_strategy_report(days=days)
+                    result = engine.format_strategy_gateway(report)
+                else:
+                    report = engine.generate(days=days, source=source)
+                    result = engine.format_gateway(report)
                 db.close()
                 return result
 
@@ -9788,6 +9800,9 @@ class GatewayRunner:
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,
                     request_overrides=turn_route.get("request_overrides"),
+                    primary_model_override=turn_route.get("primary_model"),
+                    primary_runtime_override=turn_route.get("primary_runtime"),
+                    restore_primary_after_tool_selection=turn_route.get("restore_primary_after_tool_selection", False),
                     providers_allowed=pr.get("only"),
                     providers_ignored=pr.get("ignore"),
                     providers_order=pr.get("order"),
@@ -10088,6 +10103,22 @@ class GatewayRunner:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
+
+            if agent is not None and _cache_lock and _cache is not None:
+                live_runtime = {
+                    "api_key": getattr(agent, "api_key", None),
+                    "base_url": getattr(agent, "base_url", None),
+                    "provider": getattr(agent, "provider", None),
+                    "api_mode": getattr(agent, "api_mode", None),
+                }
+                live_sig = self._agent_config_signature(
+                    getattr(agent, "model", None),
+                    live_runtime,
+                    enabled_toolsets,
+                    combined_ephemeral,
+                )
+                with _cache_lock:
+                    _cache[session_key] = (agent, live_sig)
 
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:

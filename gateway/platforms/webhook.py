@@ -559,7 +559,15 @@ class WebhookAdapter(BasePlatformAdapter):
     def _validate_signature(
         self, request: "web.Request", body: bytes, secret: str
     ) -> bool:
-        """Validate webhook signature (GitHub, GitLab, generic HMAC-SHA256)."""
+        """Validate webhook signature.
+
+        Supported schemes:
+        - GitHub: ``X-Hub-Signature-256: sha256=<hex>``
+        - GitLab: ``X-Gitlab-Token: <plain secret>``
+        - Generic HMAC: ``X-Webhook-Signature: <hex>``
+        - Circleback: ``X-Signature: <hex>`` (support article)
+        - Legacy/custom Circleback-compatible: ``X-Circleback-Signature: <hex>``
+        """
         # GitHub: X-Hub-Signature-256 = sha256=<hex>
         gh_sig = request.headers.get("X-Hub-Signature-256", "")
         if gh_sig:
@@ -573,8 +581,12 @@ class WebhookAdapter(BasePlatformAdapter):
         if gl_token:
             return hmac.compare_digest(gl_token, secret)
 
-        # Generic: X-Webhook-Signature = <hex HMAC-SHA256>
-        generic_sig = request.headers.get("X-Webhook-Signature", "")
+        # Generic / Circleback-style: plain HMAC-SHA256 hex digest
+        generic_sig = (
+            request.headers.get("X-Webhook-Signature", "")
+            or request.headers.get("X-Signature", "")
+            or request.headers.get("X-Circleback-Signature", "")
+        )
         if generic_sig:
             expected = hmac.new(
                 secret.encode(), body, hashlib.sha256

@@ -3220,16 +3220,12 @@ class HermesCLI:
         return True
 
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
-        """Build the effective model/runtime config for a single user turn.
-
-        Always uses the session's primary model/provider.  If the user has
-        toggled `/fast` on and the current model supports Priority
-        Processing / Anthropic fast mode, attach `request_overrides` so the
-        API call is marked accordingly.
-        """
+        """Build the effective model/runtime config for a single user turn."""
+        from agent.smart_model_routing import resolve_turn_route
         from hermes_cli.models import resolve_fast_mode_overrides
 
-        runtime = {
+        primary = {
+            "model": self.model,
             "api_key": self.api_key,
             "base_url": self.base_url,
             "provider": self.provider,
@@ -3238,18 +3234,11 @@ class HermesCLI:
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
         }
-        route = {
-            "model": self.model,
-            "runtime": runtime,
-            "signature": (
-                self.model,
-                runtime["provider"],
-                runtime["base_url"],
-                runtime["api_mode"],
-                runtime["command"],
-                tuple(runtime["args"]),
-            ),
-        }
+        route = resolve_turn_route(
+            user_message,
+            getattr(self, "_smart_model_routing", None),
+            primary,
+        )
 
         service_tier = getattr(self, "service_tier", None)
         if not service_tier:
@@ -3263,7 +3252,16 @@ class HermesCLI:
         route["request_overrides"] = overrides
         return route
 
-    def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:
+    def _init_agent(
+        self,
+        *,
+        model_override: str = None,
+        runtime_override: dict = None,
+        request_overrides: dict | None = None,
+        primary_model_override: str = None,
+        primary_runtime_override: dict | None = None,
+        restore_primary_after_tool_selection: bool = False,
+    ) -> bool:
         """
         Initialize the agent on first use.
         When resuming a session, restores conversation history from SQLite.
@@ -3369,6 +3367,9 @@ class HermesCLI:
                 reasoning_config=self.reasoning_config,
                 service_tier=self.service_tier,
                 request_overrides=request_overrides,
+                primary_model_override=primary_model_override,
+                primary_runtime_override=primary_runtime_override,
+                restore_primary_after_tool_selection=restore_primary_after_tool_selection,
                 providers_allowed=self._providers_only,
                 providers_ignored=self._providers_ignore,
                 providers_order=self._providers_order,
@@ -7064,10 +7065,11 @@ class HermesCLI:
 
     def _show_insights(self, command: str = "/insights"):
         """Show usage insights and analytics from session history."""
-        # Parse optional --days flag
+        # Parse optional flags
         parts = command.split()
         days = 30
         source = None
+        show_strategies = False
         i = 1
         while i < len(parts):
             if parts[i] == "--days" and i + 1 < len(parts):
@@ -7080,6 +7082,9 @@ class HermesCLI:
             elif parts[i] == "--source" and i + 1 < len(parts):
                 source = parts[i + 1]
                 i += 2
+            elif parts[i] == "--strategies":
+                show_strategies = True
+                i += 1
             else:
                 i += 1
 
@@ -7089,8 +7094,13 @@ class HermesCLI:
 
             db = SessionDB()
             engine = InsightsEngine(db)
-            report = engine.generate(days=days, source=source)
-            print(engine.format_terminal(report))
+
+            if show_strategies:
+                report = engine.generate_strategy_report(days=days)
+                print(engine.format_strategy_terminal(report))
+            else:
+                report = engine.generate(days=days, source=source)
+                print(engine.format_terminal(report))
             db.close()
         except Exception as e:
             print(f"  Error generating insights: {e}")
@@ -8251,6 +8261,9 @@ class HermesCLI:
             model_override=turn_route["model"],
             runtime_override=turn_route["runtime"],
             request_overrides=turn_route.get("request_overrides"),
+            primary_model_override=turn_route.get("primary_model"),
+            primary_runtime_override=turn_route.get("primary_runtime"),
+            restore_primary_after_tool_selection=turn_route.get("restore_primary_after_tool_selection", False),
         ):
             return None
         
@@ -8555,6 +8568,16 @@ class HermesCLI:
             ):
                 self.session_id = self.agent.session_id
                 self._pending_title = None
+
+            if self.agent is not None:
+                self._active_agent_route_signature = (
+                    getattr(self.agent, "model", None),
+                    getattr(self.agent, "provider", None),
+                    getattr(self.agent, "base_url", None),
+                    getattr(self.agent, "api_mode", None),
+                    getattr(self.agent, "acp_command", None),
+                    tuple(getattr(self.agent, "acp_args", []) or ()),
+                )
 
             # Get the final response
             response = result.get("final_response", "") if result else ""
@@ -11011,6 +11034,9 @@ def main(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
                     request_overrides=turn_route.get("request_overrides"),
+                    primary_model_override=turn_route.get("primary_model"),
+                    primary_runtime_override=turn_route.get("primary_runtime"),
+                    restore_primary_after_tool_selection=turn_route.get("restore_primary_after_tool_selection", False),
                 ):
                     cli.agent.quiet_mode = True
                     cli.agent.suppress_status_output = True

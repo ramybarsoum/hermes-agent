@@ -1200,7 +1200,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 9
+        assert version == 11
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1256,12 +1256,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v9
+        # Open with SessionDB — should migrate to current schema
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 9
+        assert cursor.fetchone()[0] == 11
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -1939,3 +1939,486 @@ class TestAutoMaintenance:
         # Should parse as a float timestamp close to now.
         assert abs(float(marker) - time.time()) < 60
 
+# =========================================================================
+# Strategy telemetry (evidence-backed agent improvement, Phase 1)
+# =========================================================================
+
+class TestStrategyEvents:
+    """Tests for strategy_events table, migration v7, and recording."""
+
+    def test_strategy_events_table_created_on_init(self, db):
+        """v7 migration should create the strategy_events table."""
+        cursor = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_events'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_strategy_events_indexes_created(self, db):
+        """v7 migration should create the expected indexes."""
+        cursor = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_se_%'"
+        )
+        indexes = {row["name"] for row in cursor.fetchall()}
+        assert "idx_se_session" in indexes
+        assert "idx_se_type" in indexes
+        assert "idx_se_timestamp" in indexes
+
+    def test_schema_version_is_current(self, db):
+        """After init, schema version should be current."""
+        cursor = db._conn.execute("SELECT version FROM schema_version LIMIT 1")
+        row = cursor.fetchone()
+        assert row["version"] == 11
+
+    def test_record_strategy_event_basic(self, db):
+        """record_strategy_event should insert a row."""
+        db.create_session(session_id="s1", source="cli")
+        db.record_strategy_event(
+            session_id="s1",
+            event_type="tool_call",
+            tool_name="terminal",
+            result="success",
+            latency_ms=150.3,
+        )
+        events = db.get_strategy_events(session_id="s1")
+        assert len(events) == 1
+        assert events[0]["event_type"] == "tool_call"
+        assert events[0]["tool_name"] == "terminal"
+        assert events[0]["result"] == "success"
+        assert events[0]["latency_ms"] == 150.3
+
+    def test_record_strategy_event_with_metadata(self, db):
+        """Metadata should be stored as JSON and queryable."""
+        db.create_session(session_id="s2", source="cli")
+        db.record_strategy_event(
+            session_id="s2",
+            event_type="tool_call",
+            tool_name="write_file",
+            result="failure",
+            latency_ms=42.0,
+            metadata={"error_type": "PermissionError", "path": "/etc/hosts"},
+        )
+        events = db.get_strategy_events(session_id="s2")
+        assert len(events) == 1
+        import json
+        meta = json.loads(events[0]["metadata_json"])
+        assert meta["error_type"] == "PermissionError"
+
+    def test_record_strategy_event_best_effort(self, db):
+        """record_strategy_event should not raise even with invalid session_id.
+
+        Telemetry must never block tool execution.
+        """
+        # No session created for "nonexistent" — FK constraint would fail,
+        # but the method must swallow the error.
+        db.record_strategy_event(
+            session_id="nonexistent",
+            event_type="tool_call",
+            tool_name="test",
+            result="success",
+        )
+        # Should not raise — best-effort
+
+    def test_get_strategy_events_filter_by_type(self, db):
+        """get_strategy_events should filter by event_type."""
+        db.create_session(session_id="s3", source="cli")
+        db.record_strategy_event(session_id="s3", event_type="tool_call", tool_name="a")
+        db.record_strategy_event(session_id="s3", event_type="tool_call", tool_name="b")
+        db.record_strategy_event(session_id="s3", event_type="session_end")
+        tool_events = db.get_strategy_events(session_id="s3", event_type="tool_call")
+        assert len(tool_events) == 2
+        end_events = db.get_strategy_events(session_id="s3", event_type="session_end")
+        assert len(end_events) == 1
+
+    def test_get_strategy_events_time_filter(self, db):
+        """get_strategy_events should filter by since timestamp."""
+        db.create_session(session_id="s4", source="cli")
+        before = time.time()
+        db.record_strategy_event(session_id="s4", event_type="tool_call", tool_name="early")
+        after = time.time()
+        events = db.get_strategy_events(session_id="s4", since=before)
+        assert len(events) >= 1
+        # All returned events should have timestamp >= before
+        for e in events:
+            assert e["timestamp"] >= before
+
+    def test_get_strategy_events_limit(self, db):
+        """get_strategy_events should respect the limit parameter."""
+        db.create_session(session_id="s5", source="cli")
+        for i in range(10):
+            db.record_strategy_event(session_id="s5", event_type="tool_call", tool_name=f"tool_{i}")
+        events = db.get_strategy_events(session_id="s5", limit=3)
+        assert len(events) == 3
+
+    def test_migration_from_v6_creates_table(self, tmp_path):
+        """Starting from a v6 database, migration should add strategy_events."""
+        import sqlite3
+        # Create a minimal v6 database with enough columns for SCHEMA_SQL
+        # indexes to not error.
+        db_path = tmp_path / "v6.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER)")
+        conn.execute("INSERT INTO schema_version VALUES (6)")
+        conn.execute("""CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT NOT NULL, user_id TEXT,
+            model TEXT, model_config TEXT, system_prompt TEXT,
+            parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL,
+            end_reason TEXT, message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0, billing_provider TEXT,
+            billing_base_url TEXT, billing_mode TEXT,
+            estimated_cost_usd REAL, actual_cost_usd REAL,
+            cost_status TEXT, cost_source TEXT, pricing_version TEXT,
+            title TEXT
+        )""")
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL, content TEXT, finish_reason TEXT, reasoning TEXT, reasoning_details TEXT, codex_reasoning_items TEXT)")
+        conn.execute("CREATE UNIQUE INDEX idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL")
+        conn.commit()
+        conn.close()
+
+        # Opening with SessionDB should migrate to current schema
+        session_db = SessionDB(db_path=db_path)
+        cursor = session_db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_events'"
+        )
+        assert cursor.fetchone() is not None
+        cursor = session_db._conn.execute("SELECT version FROM schema_version")
+        assert cursor.fetchone()["version"] == 11
+        session_db.close()
+
+
+# =========================================================================
+# Strategy registry (evidence-backed agent improvement, Phase 2)
+# =========================================================================
+
+class TestStrategyRegistrySchema:
+    """Schema v11: strategy_registry table and indexes."""
+
+    def test_strategy_registry_table_created(self, db):
+        cursor = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_registry'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_strategy_registry_indexes(self, db):
+        cursor = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sr_%'"
+        )
+        indexes = {row["name"] for row in cursor.fetchall()}
+        assert "idx_sr_state" in indexes
+        assert "idx_sr_name" in indexes
+
+    def test_schema_version_is_current(self, db):
+        cursor = db._conn.execute("SELECT version FROM schema_version LIMIT 1")
+        assert cursor.fetchone()["version"] == 11
+
+    def test_migration_from_v7(self, tmp_path):
+        """v7 → v11 migration should create strategy_registry."""
+        import sqlite3
+        db_path = tmp_path / "v7.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER)")
+        conn.execute("INSERT INTO schema_version VALUES (7)")
+        conn.execute("""CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL,
+            parent_session_id TEXT, title TEXT
+        )""")
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL, content TEXT)")
+        conn.execute("""CREATE TABLE strategy_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            timestamp REAL NOT NULL, event_type TEXT NOT NULL, tool_name TEXT,
+            result TEXT, latency_ms REAL, metadata_json TEXT
+        )""")
+        conn.execute("CREATE UNIQUE INDEX idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL")
+        conn.commit()
+        conn.close()
+
+        session_db = SessionDB(db_path=db_path)
+        cursor = session_db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_registry'"
+        )
+        assert cursor.fetchone() is not None
+        cursor = session_db._conn.execute("SELECT version FROM schema_version")
+        assert cursor.fetchone()["version"] == 11
+        session_db.close()
+
+
+class TestStrategyRegistryCRUD:
+    """Register, get, list, update strategies."""
+
+    def test_register_new_strategy(self, db):
+        result = db.register_strategy(
+            "prefer_parallel_reads",
+            description="Use concurrent execution for read-only tool batches",
+            strategy_type="tool_ordering",
+        )
+        assert result["name"] == "prefer_parallel_reads"
+        assert result["state"] == "candidate"
+        assert result["score"] == 0.0
+
+    def test_register_duplicate_updates(self, db):
+        db.register_strategy("test_strat", description="v1")
+        result = db.register_strategy("test_strat", description="v2")
+        assert result["description"] == "v2"
+        assert result["state"] == "candidate"  # state unchanged
+
+    def test_get_strategy(self, db):
+        db.register_strategy("fetcher", strategy_type="routing")
+        result = db.get_strategy("fetcher")
+        assert result is not None
+        assert result["strategy_type"] == "routing"
+
+    def test_get_strategy_not_found(self, db):
+        assert db.get_strategy("nonexistent") is None
+
+    def test_list_strategies_all(self, db):
+        db.register_strategy("a", strategy_type="routing")
+        db.register_strategy("b", strategy_type="retry")
+        db.register_strategy("c", strategy_type="routing")
+        all_strats = db.list_strategies()
+        assert len(all_strats) == 3
+
+    def test_list_strategies_filter_by_state(self, db):
+        db.register_strategy("cand1")
+        db.register_strategy("cand2")
+        # Manually promote one
+        now = time.time()
+        def _do(conn):
+            conn.execute(
+                "UPDATE strategy_registry SET state='promoted', promoted_at=?, updated_at=? WHERE name='cand1'",
+                (now, now),
+            )
+        db._execute_write(_do)
+        promoted = db.list_strategies(state="promoted")
+        assert len(promoted) == 1
+        assert promoted[0]["name"] == "cand1"
+
+    def test_list_strategies_filter_by_type(self, db):
+        db.register_strategy("x", strategy_type="routing")
+        db.register_strategy("y", strategy_type="retry")
+        routing = db.list_strategies(strategy_type="routing")
+        assert len(routing) == 1
+        assert routing[0]["name"] == "x"
+
+
+class TestStrategyAggregation:
+    """aggregate_tool_stats and recompute_strategy_score."""
+
+    def _seed_events(self, db, n_success, n_failure, avg_latency=100.0, strategy=None):
+        """Seed strategy_events with mock tool_call data."""
+        db.create_session(session_id="agg-test", source="cli")
+        for i in range(n_success):
+            db.record_strategy_event(
+                session_id="agg-test", event_type="tool_call",
+                tool_name="terminal", strategy=strategy,
+                result="success", latency_ms=avg_latency,
+            )
+        for i in range(n_failure):
+            db.record_strategy_event(
+                session_id="agg-test", event_type="tool_call",
+                tool_name="terminal", strategy=strategy,
+                result="failure", latency_ms=avg_latency * 3,
+            )
+
+    def test_aggregate_tool_stats(self, db):
+        self._seed_events(db, 80, 20, 150.0)
+        stats = db.aggregate_tool_stats()
+        assert len(stats) == 1
+        assert stats[0]["tool_name"] == "terminal"
+        assert stats[0]["total_calls"] == 100
+        assert stats[0]["success_count"] == 80
+        assert stats[0]["failure_count"] == 20
+
+    def test_aggregate_tool_stats_with_time_filter(self, db):
+        self._seed_events(db, 5, 5, 100.0)
+        future = time.time() + 10000
+        stats = db.aggregate_tool_stats(since=future)
+        assert len(stats) == 0  # nothing in the future
+
+    def test_recompute_strategy_score_basic(self, db):
+        self._seed_events(db, 90, 10, 100.0, strategy="test_score")
+        db.register_strategy("test_score", baseline_latency_ms=150.0)
+        result = db.recompute_strategy_score("test_score")
+        assert result is not None
+        assert result["sample_count"] == 100
+        assert result["success_count"] == 90
+        assert result["score"] > 0
+
+    def test_recompute_strategy_score_ignores_other_strategy_events(self, db):
+        db.create_session(session_id="strategy-scope", source="cli")
+        for _ in range(30):
+            db.record_strategy_event(
+                session_id="strategy-scope", event_type="tool_call",
+                tool_name="terminal", strategy="other_strat",
+                result="success", latency_ms=50.0,
+            )
+        for _ in range(5):
+            db.record_strategy_event(
+                session_id="strategy-scope", event_type="tool_call",
+                tool_name="terminal", strategy="target_strat",
+                result="success", latency_ms=100.0,
+            )
+
+        db.register_strategy("target_strat", baseline_latency_ms=150.0)
+        result = db.recompute_strategy_score("target_strat")
+
+        assert result["sample_count"] == 5
+        assert result["success_count"] == 5
+
+    def test_recompute_strategy_not_found(self, db):
+        result = db.recompute_strategy_score("ghost")
+        assert result is None
+
+
+class TestStrategyPromotion:
+    """Promotion gate: checks, thresholds, state transitions."""
+
+    def _seed_good_data(self, db, n=50, success_rate=0.90, latency=100.0, strategy="good_strat"):
+        """Seed enough data to pass promotion gates."""
+        db.create_session(session_id="promo-test", source="cli")
+        n_success = int(n * success_rate)
+        n_failure = n - n_success
+        for _ in range(n_success):
+            db.record_strategy_event(
+                session_id="promo-test", event_type="tool_call",
+                tool_name="test_tool", strategy=strategy,
+                result="success", latency_ms=latency,
+            )
+        for _ in range(n_failure):
+            db.record_strategy_event(
+                session_id="promo-test", event_type="tool_call",
+                tool_name="test_tool", strategy=strategy,
+                result="failure", latency_ms=latency * 3,
+            )
+
+    def test_promotion_passes_with_good_data(self, db):
+        self._seed_good_data(db, n=30, success_rate=0.90)
+        db.register_strategy("good_strat", baseline_latency_ms=200.0)
+        verdict = db.evaluate_promotion("good_strat")
+        assert verdict["can_promote"], f"Expected promotion, got: {verdict['reason']}"
+
+    def test_promotion_fails_insufficient_samples(self, db):
+        self._seed_good_data(db, n=5, success_rate=1.0, strategy="low_n_strat")
+        db.register_strategy("low_n_strat")
+        verdict = db.evaluate_promotion("low_n_strat")
+        assert not verdict["can_promote"]
+        assert "min_samples" in verdict["reason"]
+
+    def test_promotion_fails_low_success_rate(self, db):
+        self._seed_good_data(db, n=30, success_rate=0.50, strategy="bad_strat")
+        db.register_strategy("bad_strat")
+        verdict = db.evaluate_promotion("bad_strat")
+        assert not verdict["can_promote"]
+        assert "success_rate" in verdict["reason"]
+
+    def test_promote_strategy_transitions_state(self, db):
+        self._seed_good_data(db, n=30, success_rate=0.95, strategy="auto_promo")
+        db.register_strategy("auto_promo", baseline_latency_ms=200.0)
+        verdict = db.promote_strategy("auto_promo")
+        assert verdict["can_promote"]
+        assert verdict["strategy"]["state"] == "promoted"
+        assert verdict["strategy"]["promoted_at"] is not None
+
+    def test_promotion_ignores_unrelated_strategy_evidence(self, db):
+        self._seed_good_data(db, n=30, success_rate=1.0, strategy="other_strat")
+        db.register_strategy("target_without_evidence")
+        verdict = db.evaluate_promotion("target_without_evidence")
+
+        assert not verdict["can_promote"]
+        assert "min_samples" in verdict["reason"]
+
+    def test_promote_strategy_blocked_for_non_candidate(self, db):
+        db.register_strategy("already_promoted")
+        now = time.time()
+        def _do(conn):
+            conn.execute(
+                "UPDATE strategy_registry SET state='promoted', promoted_at=?, updated_at=? WHERE name=?",
+                (now, now, "already_promoted"),
+            )
+        db._execute_write(_do)
+        verdict = db.evaluate_promotion("already_promoted")
+        assert not verdict["can_promote"]
+        assert "state is 'promoted'" in verdict["reason"]
+
+    def test_promote_not_found(self, db):
+        verdict = db.evaluate_promotion("ghost")
+        assert not verdict["can_promote"]
+        assert "not found" in verdict["reason"]
+
+
+class TestStrategyRetirement:
+    """Retire promoted strategies and verify state transition."""
+
+    def test_retire_strategy(self, db):
+        db.register_strategy("to_retire")
+        now = time.time()
+        def _do(conn):
+            conn.execute(
+                "UPDATE strategy_registry SET state='promoted', promoted_at=?, updated_at=? WHERE name=?",
+                (now, now, "to_retire"),
+            )
+        db._execute_write(_do)
+
+        result = db.retire_strategy("to_retire", reason="regression detected")
+        assert result["state"] == "retired"
+        assert result["retired_at"] is not None
+
+        # Check retire_reason in config_json
+        import json as _json
+        config = _json.loads(result["config_json"])
+        assert config["retire_reason"] == "regression detected"
+
+    def test_retire_not_found(self, db):
+        assert db.retire_strategy("ghost") is None
+
+    def test_get_promoted_strategies(self, db):
+        db.register_strategy("promo_a")
+        db.register_strategy("promo_b")
+        db.register_strategy("cand_c")
+        now = time.time()
+        def _do(conn):
+            conn.execute(
+                "UPDATE strategy_registry SET state='promoted', promoted_at=?, updated_at=? WHERE name IN ('promo_a', 'promo_b')",
+                (now, now),
+            )
+        db._execute_write(_do)
+        promoted = db.get_promoted_strategies()
+        names = {s["name"] for s in promoted}
+        assert names == {"promo_a", "promo_b"}
+
+    def test_full_lifecycle(self, db):
+        """Register → candidate → promote → retire."""
+        # Seed data
+        db.create_session(session_id="lc-test", source="cli")
+        for _ in range(25):
+            db.record_strategy_event(
+                session_id="lc-test", event_type="tool_call",
+                tool_name="x", strategy="lifecycle",
+                result="success", latency_ms=50.0,
+            )
+        for _ in range(3):
+            db.record_strategy_event(
+                session_id="lc-test", event_type="tool_call",
+                tool_name="x", strategy="lifecycle",
+                result="failure", latency_ms=200.0,
+            )
+
+        # Register
+        s = db.register_strategy("lifecycle", baseline_latency_ms=100.0, strategy_type="retry")
+        assert s["state"] == "candidate"
+
+        # Promote
+        verdict = db.promote_strategy("lifecycle")
+        assert verdict["can_promote"]
+        assert verdict["strategy"]["state"] == "promoted"
+
+        # Retire
+        retired = db.retire_strategy("lifecycle", reason="post-deploy regression")
+        assert retired["state"] == "retired"
+
+        # Verify final state
+        final = db.get_strategy("lifecycle")
+        assert final["state"] == "retired"
+        assert final["promoted_at"] is not None
+        assert final["retired_at"] is not None

@@ -563,8 +563,12 @@ def build_oauth_auth(
     client_metadata = _build_client_metadata(cfg)
     _maybe_preregister_client(storage, cfg, client_metadata)
 
+    # Pass the full URL (minus any fragment) so RFC 8707 resource matching
+    # preserves pathful MCP resources such as https://mcp.example.com/mcp.
+    discovery_url = server_url.split("#", 1)[0]
+
     return OAuthClientProvider(
-        server_url=server_url,
+        server_url=discovery_url,
         client_metadata=client_metadata,
         storage=storage,
         redirect_handler=_redirect_handler,

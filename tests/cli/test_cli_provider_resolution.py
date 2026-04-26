@@ -212,6 +212,79 @@ def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
 
     assert result["model"] == "gpt-5"
     assert result["runtime"]["provider"] == "openrouter"
+    assert result["label"] is None
+
+
+def test_cli_turn_routing_uses_cheap_model_when_simple(monkeypatch):
+    cli = _import_cli()
+
+    def _runtime_resolve(**kwargs):
+        assert kwargs["requested"] == "zai"
+        return {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+
+    shell = cli.HermesCLI(model="anthropic/claude-sonnet-4", compact=True, max_turns=1)
+    shell.provider = "openrouter"
+    shell.api_mode = "chat_completions"
+    shell.base_url = "https://openrouter.ai/api/v1"
+    shell.api_key = "primary-key"
+    shell._smart_model_routing = {
+        "enabled": True,
+        "cheap_model": {"provider": "zai", "model": "glm-5-air"},
+        "max_simple_chars": 160,
+        "max_simple_words": 28,
+    }
+
+    result = shell._resolve_turn_agent_config("what time is it in tokyo?")
+
+    assert result["model"] == "glm-5-air"
+    assert result["runtime"]["provider"] == "zai"
+    assert result["runtime"]["api_key"] == "cheap-key"
+    assert result["label"] is not None
+    assert result["restore_primary_after_tool_selection"] is False
+
+
+def test_cli_turn_routing_marks_tool_phase_restore_for_tool_task(monkeypatch):
+    cli = _import_cli()
+
+    def _runtime_resolve(**kwargs):
+        assert kwargs["requested"] == "zai"
+        return {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+
+    shell = cli.HermesCLI(model="gpt-5.4", compact=True, max_turns=1)
+    shell.provider = "openai-codex"
+    shell.api_mode = "codex_responses"
+    shell.base_url = "https://api.openai.com/v1"
+    shell.api_key = "primary-key"
+    shell._smart_model_routing = {
+        "enabled": True,
+        "cheap_model": {"provider": "zai", "model": "glm-5-air"},
+        "max_simple_chars": 160,
+        "max_simple_words": 28,
+    }
+
+    result = shell._resolve_turn_agent_config("please search the web for latest OpenAI news")
+
+    assert result["model"] == "glm-5-air"
+    assert result["runtime"]["provider"] == "zai"
+    assert result["restore_primary_after_tool_selection"] is True
+    assert result["primary_model"] == "gpt-5.4"
+    assert result["primary_runtime"]["provider"] == "openai-codex"
 
 
 def test_cli_prefers_config_provider_over_stale_env_override(monkeypatch):
@@ -320,7 +393,7 @@ def test_model_flow_nous_offers_tool_gateway_prompt_when_unconfigured(monkeypatc
         "hermes_cli.auth.resolve_nous_runtime_credentials",
         lambda *args, **kwargs: {
             "base_url": "https://inference.example.com/v1",
-            "api_key": "***",
+            "api_key": "cheap-key",
         },
     )
     monkeypatch.setattr(

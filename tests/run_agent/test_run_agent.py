@@ -1480,6 +1480,45 @@ class TestFormatToolsForSystemMessage:
 
 
 class TestExecuteToolCalls:
+    def test_tool_phase_restore_switches_back_to_primary(self, agent):
+        agent.model = "glm-5-air"
+        agent.provider = "zai"
+        agent.base_url = "https://open.z.ai/api/v1"
+        agent.api_mode = "chat_completions"
+        agent.api_key = "cheap-key"
+        agent._client_kwargs = {
+            "api_key": "cheap-key",
+            "base_url": "https://open.z.ai/api/v1",
+        }
+        agent._primary_runtime = {
+            "model": "gpt-5.4",
+            "provider": "openai-codex",
+            "base_url": "https://api.openai.com/v1",
+            "api_mode": "codex_responses",
+            "api_key": "primary-key",
+            "client_kwargs": {
+                "api_key": "primary-key",
+                "base_url": "https://api.openai.com/v1",
+            },
+            "use_prompt_caching": False,
+            "compressor_model": "gpt-5.4",
+            "compressor_base_url": "https://api.openai.com/v1",
+            "compressor_api_key": "primary-key",
+            "compressor_provider": "openai-codex",
+            "compressor_context_length": agent.context_compressor.context_length,
+            "compressor_threshold_tokens": agent.context_compressor.threshold_tokens,
+        }
+        agent._restore_primary_after_tool_selection = True
+
+        with patch.object(agent, "_create_openai_client", return_value=MagicMock()):
+            restored = agent._maybe_restore_primary_after_tool_selection()
+
+        assert restored is True
+        assert agent.model == "gpt-5.4"
+        assert agent.provider == "openai-codex"
+        assert agent.api_mode == "codex_responses"
+        assert agent._restore_primary_after_tool_selection is False
+
     def test_single_tool_executed(self, agent):
         tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
