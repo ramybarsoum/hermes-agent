@@ -62,6 +62,9 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 
 
 def _ensure_authenticated():
+    if TOKEN_PATH.exists() or _gws_binary():
+        return
+
     if not TOKEN_PATH.exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
@@ -88,7 +91,12 @@ def _gws_binary() -> str | None:
 
 def _gws_env() -> dict[str, str]:
     env = os.environ.copy()
-    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
+    if TOKEN_PATH.exists():
+        env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
+    else:
+        # Let gws use its native store (usually ~/.config/gws + keyring) when
+        # Hermes has not created a profile-scoped OAuth token yet.
+        env.pop("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", None)
     return env
 
 

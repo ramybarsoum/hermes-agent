@@ -26,6 +26,7 @@ from __future__ import annotations  # allow PEP 604 `X | None` on Python 3.9+
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -130,12 +131,59 @@ def _ensure_deps():
             sys.exit(1)
 
 
+def _gws_binary() -> str | None:
+    override = os.getenv("HERMES_GWS_BIN")
+    if override:
+        return override
+    return shutil.which("gws")
+
+
+def _gws_native_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", None)
+    return env
+
+
+def _check_gws_native_auth(quiet: bool = False) -> bool:
+    """Return True when the standalone gws CLI can make a real Workspace call."""
+    binary = _gws_binary()
+    if not binary:
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                binary,
+                "calendar",
+                "calendarList",
+                "list",
+                "--params",
+                json.dumps({"maxResults": 1, "fields": "items(id),nextPageToken"}),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_gws_native_env(),
+        )
+    except Exception:
+        return False
+
+    if result.returncode != 0:
+        return False
+    if not quiet:
+        print("AUTHENTICATED: gws CLI native auth works via its configured credential store.")
+    return True
+
+
 def check_auth_live():
     """Check auth with a real API call to detect disabled_client/account issues."""
     # quiet=True suppresses the "AUTHENTICATED" print from check_auth so the
     # final status line reflects the live-call outcome (OK or FAILED).
     if not check_auth(quiet=True):
         return False
+    if not TOKEN_PATH.exists():
+        print("LIVE_CHECK_OK: gws CLI API call succeeded.")
+        return True
     try:
         from googleapiclient.discovery import build
         from google.oauth2.credentials import Credentials
@@ -159,6 +207,8 @@ def check_auth_live():
 def check_auth(quiet: bool = False):
     """Check if stored credentials are valid. Prints status, exits 0 or 1."""
     if not TOKEN_PATH.exists():
+        if _check_gws_native_auth(quiet=quiet):
+            return True
         print(f"NOT_AUTHENTICATED: No token at {TOKEN_PATH}")
         return False
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,35 @@ _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
 # load_hermes_dotenv() calls (user env + project env, gateway hot-reload,
 # tests) don't spam the same warning multiple times.
 _WARNED_KEYS: set[str] = set()
+
+
+def _resolved_op_env_values(path: Path) -> dict[str, str]:
+    """Return resolved env values that should survive raw op:// dotenv refs.
+
+    Max launches Hermes through `op run --env-file`, which resolves 1Password
+    references before Python starts. A later python-dotenv load with
+    override=True would otherwise clobber those resolved values back to raw
+    `op://...` strings from the same env file.
+    """
+    if not path.exists():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return {}
+
+    preserved: dict[str, str] = {}
+    for line in lines:
+        match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        key, raw_value = match.groups()
+        if not raw_value.strip().strip('"').strip("'").startswith("op://"):
+            continue
+        current = os.environ.get(key)
+        if current and not current.startswith("op://"):
+            preserved[key] = current
+    return preserved
 
 
 def _format_offending_chars(value: str, limit: int = 3) -> str:
@@ -82,10 +112,12 @@ def _sanitize_loaded_credentials() -> None:
 
 
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
+    preserved = _resolved_op_env_values(path) if override else {}
     try:
         load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
     except UnicodeDecodeError:
         load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
+    os.environ.update(preserved)
     # Strip non-ASCII characters from credential env vars that were just
     # loaded.  API keys must be pure ASCII since they're sent as HTTP
     # header values (httpx encodes headers as ASCII).  Non-ASCII chars

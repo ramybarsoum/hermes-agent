@@ -2791,12 +2791,23 @@ def generate_launchd_plist() -> str:
         dict.fromkeys(priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p])
     )
 
-    # Build ProgramArguments array, including --profile when using a named profile
+    wrapper_cfg = read_raw_config().get("launchd_wrapper") or {}
+    wrapper_command = wrapper_cfg.get("command") if isinstance(wrapper_cfg, dict) else None
+    wrapper_env_file = wrapper_cfg.get("env_file") if isinstance(wrapper_cfg, dict) else None
+
+    # Build ProgramArguments array, including --profile when using a named profile.
+    # launchd_wrapper lets local installs source secrets before starting Hermes.
     prog_args = [
         f"<string>{python_path}</string>",
         "<string>-m</string>",
         "<string>hermes_cli.main</string>",
     ]
+    if isinstance(wrapper_command, str) and wrapper_command.strip():
+        prog_args = [f"<string>{wrapper_command}</string>"] + (
+            [f"<string>{wrapper_env_file}</string>"]
+            if isinstance(wrapper_env_file, str) and wrapper_env_file.strip()
+            else []
+        ) + prog_args
     if profile_arg:
         for part in profile_arg.split():
             prog_args.append(f"<string>{part}</string>")
