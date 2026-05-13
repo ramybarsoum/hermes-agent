@@ -148,6 +148,27 @@ class TestGetAuthUrl:
         assert flow.authorization_kwargs == {"access_type": "offline", "prompt": "consent"}
 
 
+class TestCheckAuth:
+    def test_uses_native_gws_auth_when_profile_token_missing(self, setup_module, monkeypatch, capsys):
+        calls = []
+        monkeypatch.setattr(setup_module, "_gws_binary", lambda: "/usr/local/bin/gws")
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return types.SimpleNamespace(returncode=0, stdout='{"items": []}', stderr="")
+
+        monkeypatch.setattr(setup_module.subprocess, "run", fake_run)
+        assert not setup_module.TOKEN_PATH.exists()
+
+        assert setup_module.check_auth() is True
+
+        out = capsys.readouterr().out
+        assert "gws CLI native auth works" in out
+        cmd, kwargs = calls[0]
+        assert cmd[:4] == ["/usr/local/bin/gws", "calendar", "calendarList", "list"]
+        assert "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE" not in kwargs["env"]
+
+
 class TestExchangeAuthCode:
     def test_reuses_saved_pkce_material_for_plain_code(self, setup_module):
         setup_module.PENDING_AUTH_PATH.write_text(

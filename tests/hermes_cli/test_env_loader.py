@@ -70,6 +70,27 @@ def test_user_env_takes_precedence_over_project_env(tmp_path, monkeypatch):
     assert os.getenv("OPENAI_API_KEY") == "project-key"
 
 
+def test_resolved_onepassword_values_survive_user_env_reload(tmp_path, monkeypatch):
+    """op run resolves op:// refs before startup; reloads must not undo that."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    user_env = home / ".env"
+    user_env.write_text(
+        "OPENAI_API_KEY=op://vault/hermes/openai-api-key\n"
+        "HERMES_INFERENCE_PROVIDER=openai-codex\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-resolved-by-op-run")
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+
+    loaded = load_hermes_dotenv(hermes_home=home)
+
+    assert loaded == [user_env]
+    assert os.getenv("OPENAI_API_KEY") == "sk-resolved-by-op-run"
+    assert os.getenv("HERMES_INFERENCE_PROVIDER") == "openai-codex"
+
+
 def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     home.mkdir()

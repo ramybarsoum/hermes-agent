@@ -131,6 +131,24 @@ def test_bridge_main_injects_token_env(bridge_module, tmp_path):
     assert captured["cmd"] == ["gws", "gmail", "+triage"]
 
 
+def test_api_gws_env_uses_native_store_when_profile_token_missing(api_module, monkeypatch):
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "/tmp/stale-token.json")
+    assert not api_module.TOKEN_PATH.exists()
+
+    env = api_module._gws_env()
+
+    assert "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE" not in env
+
+
+def test_api_gws_env_prefers_profile_token_when_present(api_module, monkeypatch):
+    monkeypatch.setenv("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "/tmp/stale-token.json")
+    api_module.TOKEN_PATH.write_text("{}")
+
+    env = api_module._gws_env()
+
+    assert env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] == str(api_module.TOKEN_PATH)
+
+
 def test_api_calendar_list_uses_events_list(api_module):
     """calendar_list calls _run_gws with events list + params."""
     captured = {}

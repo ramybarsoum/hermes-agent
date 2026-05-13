@@ -1649,6 +1649,26 @@ class TestProfileArg:
         assert "<string>--profile</string>" in plist
         assert "<string>mybot</string>" in plist
 
+    def test_launchd_plist_can_prefix_configured_wrapper(self, tmp_path, monkeypatch):
+        """Local launchd installs can run through a secrets/env wrapper."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+        monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {
+            "launchd_wrapper": {
+                "command": "/Users/cole/RBrain/scripts/op-run-rbrain-agents.sh",
+                "env_file": "/Users/cole/RBrain/env/rbrain.env",
+            }
+        })
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        assert "<string>/Users/cole/RBrain/scripts/op-run-rbrain-agents.sh</string>" in plist
+        assert "<string>/Users/cole/RBrain/env/rbrain.env</string>" in plist
+        assert plist.index("op-run-rbrain-agents.sh") < plist.index("<string>-m</string>")
+        assert plist.index("rbrain.env") < plist.index("hermes_cli.main")
+
     def test_launchd_plist_path_uses_real_user_home_not_profile_home(self, tmp_path, monkeypatch):
         profile_dir = tmp_path / ".hermes" / "profiles" / "orcha"
         profile_dir.mkdir(parents=True)
