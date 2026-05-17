@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
 from hermes_cli.config import load_config, _expand_env_vars
+from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
@@ -1279,11 +1280,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
-        from dotenv import load_dotenv
-        try:
-            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="utf-8")
-        except UnicodeDecodeError:
-            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="latin-1")
+        load_hermes_dotenv(hermes_home=_get_hermes_home())
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:

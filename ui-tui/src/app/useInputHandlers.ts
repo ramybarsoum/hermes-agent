@@ -186,7 +186,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       }
 
       if (cur === null) {
-        cRefs.historyDraftRef.current = cState.input
+        cActions.setHistoryDraft(cState.input)
       }
 
       const index = cur === null ? h.length - 1 : Math.max(0, cur - 1)

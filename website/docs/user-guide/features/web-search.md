@@ -27,7 +27,7 @@ Both are configured through a single backend selection. Providers are chosen via
 **Per-capability split:** you can use different providers for search and extract independently — for example SearXNG (free) for search and Firecrawl for extract. See [Per-capability configuration](#per-capability-configuration) below.
 
 :::tip Nous Subscribers
-If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, web search and extract are available through the **[Tool Gateway](tool-gateway.md)** via managed Firecrawl — no API key needed. Run `hermes tools` to enable it.
+If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, web search and extract are available through the **[Tool Gateway](/user-guide/features/tool-gateway)** via managed Firecrawl — no API key needed. Run `hermes tools` to enable it.
 :::
 
 ---
@@ -62,7 +62,7 @@ auxiliary:
 
 Or pick interactively: `hermes model` → **Configure auxiliary models** → `web_extract`.
 
-See [Auxiliary Models](/docs/user-guide/configuration#auxiliary-models) for the full reference and per-task override patterns.
+See [Auxiliary Models](/user-guide/configuration#auxiliary-models) for the full reference and per-task override patterns.
 
 ### When summarization gets in the way
 

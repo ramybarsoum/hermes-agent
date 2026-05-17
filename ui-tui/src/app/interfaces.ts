@@ -143,6 +143,7 @@ export interface ComposerActions {
   removeQueue: (index: number) => void
   replaceQueue: (index: number, text: string) => void
   setCompIdx: StateSetter<number>
+  setHistoryDraft: (value: string) => void
   setHistoryIdx: StateSetter<null | number>
   setInput: StateSetter<string>
   setInputBuf: StateSetter<string[]>

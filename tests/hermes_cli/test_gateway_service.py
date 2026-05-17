@@ -38,6 +38,10 @@ class TestUserSystemdPrivateSocketPreflight:
 
 
 class TestSystemdServiceRefresh:
+    @pytest.fixture(autouse=True)
+    def _skip_live_user_systemd_preflight(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
+
     def test_systemd_install_repairs_outdated_unit_without_force(self, tmp_path, monkeypatch):
         unit_path = tmp_path / "hermes-gateway.service"
         unit_path.write_text("old unit\n", encoding="utf-8")
@@ -737,6 +741,10 @@ class TestGatewayServiceDetection:
         assert gateway_cli._is_service_running() is False
 
 class TestGatewaySystemServiceRouting:
+    @pytest.fixture(autouse=True)
+    def _skip_live_user_systemd_preflight(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
+
     def test_systemd_restart_gracefully_restarts_running_service_and_waits(self, monkeypatch, capsys):
         calls = []
 
@@ -1648,6 +1656,26 @@ class TestProfileArg:
         plist = gateway_cli.generate_launchd_plist()
         assert "<string>--profile</string>" in plist
         assert "<string>mybot</string>" in plist
+
+    def test_launchd_plist_can_prefix_configured_wrapper(self, tmp_path, monkeypatch):
+        """Local launchd installs can run through a secrets/env wrapper."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+        monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {
+            "launchd_wrapper": {
+                "command": "/Users/cole/RBrain/scripts/op-run-rbrain-agents.sh",
+                "env_file": "/Users/cole/RBrain/env/rbrain.env",
+            }
+        })
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        assert "<string>/Users/cole/RBrain/scripts/op-run-rbrain-agents.sh</string>" in plist
+        assert "<string>/Users/cole/RBrain/env/rbrain.env</string>" in plist
+        assert plist.index("op-run-rbrain-agents.sh") < plist.index("<string>-m</string>")
+        assert plist.index("rbrain.env") < plist.index("hermes_cli.main")
 
     def test_launchd_plist_path_uses_real_user_home_not_profile_home(self, tmp_path, monkeypatch):
         profile_dir = tmp_path / ".hermes" / "profiles" / "orcha"

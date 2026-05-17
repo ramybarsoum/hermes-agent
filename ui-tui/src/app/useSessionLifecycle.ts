@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs'
 
 import type { ScrollBoxHandle } from '@hermes/ink'
 import { evictInkCaches } from '@hermes/ink'
-import { useCallback, type RefObject } from 'react'
+import { type RefObject, useCallback } from 'react'
 
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import { introMsg, toTranscriptMessages } from '../domain/messages.js'
@@ -109,7 +109,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     (info: null | SessionInfo = null) => {
       turnController.idle()
       turnController.clearReasoning()
-      turnController.turnTools = []
+      turnController.clearTurnTrail()
       turnController.persistedToolLabels.clear()
 
       setHistoryItems(info ? [introMsg(info)] : [])
