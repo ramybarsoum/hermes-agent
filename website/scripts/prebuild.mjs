@@ -21,9 +21,29 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const websiteDir = resolve(scriptDir, "..");
+const repoRoot = resolve(websiteDir, "..");
 const extractScript = join(scriptDir, "extract-skills.py");
 const llmsScript = join(scriptDir, "generate-llms-txt.py");
 const outputFile = join(websiteDir, "src", "data", "skills.json");
+
+function resolvePython() {
+  const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim();
+  if (configured) return configured;
+
+  const venv = process.env.VIRTUAL_ENV?.trim();
+  const candidates = [
+    venv && join(venv, "bin", "python"),
+    venv && join(venv, "Scripts", "python.exe"),
+    join(repoRoot, ".venv", "bin", "python"),
+    join(repoRoot, ".venv", "bin", "python3"),
+    join(repoRoot, "venv", "bin", "python"),
+    join(repoRoot, "venv", "bin", "python3"),
+  ];
+
+  return candidates.find((p) => p && existsSync(p)) || (process.platform === "win32" ? "python" : "python3");
+}
+
+const python = resolvePython();
 
 function writeEmptyFallback(reason) {
   mkdirSync(dirname(outputFile), { recursive: true });
@@ -39,9 +59,9 @@ function runPython(script, label) {
     console.warn(`[prebuild] ${label} skipped (script missing)`);
     return false;
   }
-  const r = spawnSync("python3", [script], { stdio: "inherit", cwd: websiteDir });
+  const r = spawnSync(python, [script], { stdio: "inherit", cwd: websiteDir });
   if (r.error && r.error.code === "ENOENT") {
-    console.warn(`[prebuild] ${label} skipped (python3 not found)`);
+    console.warn(`[prebuild] ${label} skipped (${python} not found)`);
     return false;
   }
   if (r.status !== 0) {
@@ -55,12 +75,12 @@ function runPython(script, label) {
 if (!existsSync(extractScript)) {
   writeEmptyFallback("extract script missing");
 } else {
-  const r = spawnSync("python3", [extractScript], {
+  const r = spawnSync(python, [extractScript], {
     stdio: "inherit",
     cwd: websiteDir,
   });
   if (r.error && r.error.code === "ENOENT") {
-    writeEmptyFallback("python3 not found");
+    writeEmptyFallback(`${python} not found`);
   } else if (r.status !== 0) {
     writeEmptyFallback(`extract-skills.py exited with status ${r.status}`);
   }
