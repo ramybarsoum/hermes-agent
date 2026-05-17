@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,18 +42,40 @@ const MUTATING_COMMANDS = [
   'yolo'
 ] as const
 
+const resolvePython = (root: string): string => {
+  const configured = process.env.HERMES_PYTHON?.trim() || process.env.PYTHON?.trim()
+
+  if (configured) {
+    return configured
+  }
+
+  const venv = process.env.VIRTUAL_ENV?.trim()
+
+  const hit = [
+    venv && resolve(venv, 'bin/python'),
+    venv && resolve(venv, 'Scripts/python.exe'),
+    resolve(root, '.venv/bin/python'),
+    resolve(root, '.venv/bin/python3'),
+    resolve(root, 'venv/bin/python'),
+    resolve(root, 'venv/bin/python3')
+  ].find(p => p && existsSync(p))
+
+  return hit || (process.platform === 'win32' ? 'python' : 'python3')
+}
+
 const loadCommandRegistryNames = (): CommandRegistryLoad => {
   const here = dirname(fileURLToPath(import.meta.url))
+  const root = resolve(here, '../../..')
 
   try {
     const names = JSON.parse(
       execFileSync(
-        process.env.PYTHON ?? 'python3',
+        resolvePython(root),
         [
           '-c',
           'import json; from hermes_cli.commands import COMMAND_REGISTRY; print(json.dumps([c.name for c in COMMAND_REGISTRY]))'
         ],
-        { cwd: resolve(here, '../../..'), encoding: 'utf8' }
+        { cwd: root, encoding: 'utf8' }
       )
     ) as string[]
 

@@ -156,6 +156,21 @@ class TurnController {
     this.statusTimer = clear(this.statusTimer)
   }
 
+  beginSubmittingTurn() {
+    this.bufRef = ''
+    this.interrupted = false
+  }
+
+  clearTurnTrail() {
+    this.turnTools = []
+    patchTurnState({ turnTrail: [] })
+  }
+
+  removeTurnTrailGroup(label: string) {
+    this.turnTools = this.turnTools.filter(line => !sameToolTrailGroup(label, line))
+    patchTurnState({ turnTrail: this.turnTools })
+  }
+
   endReasoningPhase() {
     this.reasoningStreamingTimer = clear(this.reasoningStreamingTimer)
     patchTurnState({ reasoningActive: false, reasoningStreaming: false })

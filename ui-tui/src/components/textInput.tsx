@@ -1,6 +1,6 @@
 import type { InputEvent, Key } from '@hermes/ink'
 import * as Ink from '@hermes/ink'
-import { type MutableRefObject, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { readClipboardText, writeClipboardText } from '../lib/clipboard.js'
@@ -349,7 +349,7 @@ export function TextInput({
   onPaste,
   onSubmit,
   mask,
-  mouseApiRef,
+  onMouseApiChange,
   voiceRecordKey = DEFAULT_VOICE_RECORD_KEY,
   placeholder = '',
   focus = true
@@ -797,13 +797,17 @@ export function TextInput({
     return now - last.at < MULTI_CLICK_MS && offset === last.offset
   }
 
-  if (mouseApiRef) {
-    mouseApiRef.current = {
+  useEffect(() => {
+    if (!onMouseApiChange) {
+      return
+    }
+
+    onMouseApiChange({
       dragAt: (row, col) => dragMouseSelection(offsetFromPosition(display, row, col, columns)),
       end: endMouseSelection,
       startAtBeginning: () => startMouseSelection(0)
-    }
-  }
+    })
+  })
 
   useInput(
     (inp: string, k: Key, event: InputEvent) => {
@@ -1090,11 +1094,13 @@ export function TextInput({
         if (e.button === 2) {
           e.stopImmediatePropagation?.()
           const decision = decideRightClickAction(vRef.current, selRange())
+
           if (decision.action === 'copy') {
             void writeClipboardText(decision.text)
 
             return
           }
+
           emitPaste({ cursor: curRef.current, hotkey: true, text: '', value: vRef.current })
 
           return
@@ -1155,8 +1161,8 @@ interface TextInputProps {
   columns?: number
   focus?: boolean
   mask?: string
-  mouseApiRef?: MutableRefObject<null | TextInputMouseApi>
   onChange: (v: string) => void
+  onMouseApiChange?: (api: null | TextInputMouseApi) => void
   onPaste?: (
     e: PasteEvent
   ) => { cursor: number; value: string } | Promise<{ cursor: number; value: string } | null> | null
@@ -1187,10 +1193,12 @@ export function decideRightClickAction(
 ): RightClickDecision {
   if (range && range.end > range.start) {
     const text = value.slice(range.start, range.end)
+
     if (text) {
       return { action: 'copy', text }
     }
   }
+
   return { action: 'paste' }
 }
 
